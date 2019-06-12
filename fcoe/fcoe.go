@@ -3,8 +3,11 @@ package fcoe
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"log"
 	"net"
+	"sync"
 
 	fc "github.com/bluecmd/fibrechannel"
 	"github.com/bluecmd/fibrechannel/fcoe"
@@ -13,11 +16,14 @@ import (
 )
 
 const (
-	fipEtherType = 0x8914
-	fcoeMtu      = 9216
+	fipEtherType   = 0x8914
+	fcoeMtu        = 9216
+	fcoeMinimalMTU = 2158
 )
 
 var (
+	ErrTooLowMTU = errors.New("MTU is too low to run FCoE")
+
 	allFcfMac    = net.HardwareAddr{0x01, 0x10, 0x18, 0x01, 0x00, 0x02}
 	fipTypeNames = []string{"Discovery", "Link Services", "Control", "VLAN", "VN2VN"}
 )
@@ -26,43 +32,53 @@ type handler interface {
 	Handle(sof fc.SOF, fc []byte, eof fc.EOF)
 }
 
-type fcoeh struct {
-	ifi *net.Interface
-	h   handler
+type port struct {
+	h    handler
+	ifi  *net.Interface
+	lock *sync.Mutex
+	recv chan *fc.Frame
 }
 
-func New(iface string, h handler) (*fcoeh, error) {
+func NewPort(iface string) (*port, error) {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return nil, err
 	}
-	return &fcoeh{
-		ifi: ifi,
-		h:   h,
+	if ifi.MTU < fcoeMinimalMTU {
+		return nil, ErrTooLowMTU
+	}
+	return &port{
+		ifi:  ifi,
+		lock: &sync.Mutex{},
+		recv: make(chan *fc.Frame, 0),
 	}, nil
 }
 
-func (f *fcoeh) Start() error {
+func (p *port) String() string {
+	return fmt.Sprintf("FCoE port on %s", p.ifi.Name)
+}
+
+func (p *port) Start() error {
 	// TODO(bluecmd): Replace promisc with multicast group joins
 	// TODO(bluecmd): Verify MTU is > 2158 or something sane
-	c, err := raw.ListenPacket(f.ifi, fipEtherType, nil)
+	c, err := raw.ListenPacket(p.ifi, fipEtherType, nil)
 	if err != nil {
 		return err
 	}
 	c.SetPromiscuous(true)
-	go f.handleFip(c)
+	go p.handleFip(c)
 
-	c, err = raw.ListenPacket(f.ifi, fcoe.EtherType, nil)
+	c, err = raw.ListenPacket(p.ifi, fcoe.EtherType, nil)
 	if err != nil {
 		return err
 	}
 	c.SetPromiscuous(true)
 
-	go f.handleFcoe(c)
+	go p.handleFcoe(c)
 	return nil
 }
 
-func (f *fcoeh) handleFip(c net.PacketConn) {
+func (p *port) handleFip(c net.PacketConn) {
 	var fr ethernet.Frame
 	b := make([]byte, fcoeMtu)
 
@@ -92,9 +108,10 @@ func (f *fcoeh) handleFip(c net.PacketConn) {
 	}
 }
 
-func (f *fcoeh) handleFcoe(c net.PacketConn) {
+func (p *port) handleFcoe(c net.PacketConn) {
 	var fr ethernet.Frame
 	var fe fcoe.Frame
+	var ff fc.Frame
 	b := make([]byte, fcoeMtu)
 
 	for {
@@ -109,13 +126,26 @@ func (f *fcoeh) handleFcoe(c net.PacketConn) {
 			continue
 		}
 
-		// Unpack FCoE Frame
+		// Unpack FCoE frame
 		if err := (&fe).UnmarshalBinary(fr.Payload); err != nil {
 			log.Printf("failed to unmarshal FCoE frame: %v", err)
 			continue
 		}
 
-		log.Printf("FCoE [%s -> %s]", fr.Source.String(), fr.Destination.String())
-		f.h.Handle(fe.SOF, fe.Payload, fe.EOF)
+		// Unpack FC frame
+		if err := (&ff).UnmarshalBinary(fe.SOF, fe.Payload, fe.EOF); err != nil {
+			log.Printf("failed to unmarshal FC frame: %v", err)
+			return
+		}
+
+		p.recv <- &ff
 	}
+}
+
+func (p *port) Receive() (*fc.Frame, error) {
+	return <-p.recv, nil
+}
+
+func (p *port) Send(*fc.Frame) error {
+	return errors.New("Send not implemented")
 }
