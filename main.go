@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	PortTypeN PortType = 1
+	PortTypeF PortType = 1
 	PortTypeE PortType = 2
 )
 
@@ -31,7 +31,7 @@ type sanSwitch struct {
 func main() {
 	sw := NewSwitch()
 
-	// Add one FCoE N_port
+	// Add one FCoE F_port
 	f, err := fcoe.NewPort("ens1")
 	if err != nil {
 		log.Fatalf("FCoE port creation failed: %v", err)
@@ -40,7 +40,7 @@ func main() {
 		log.Fatalf("FCoE port starting failed: %v", err)
 	}
 
-	sw.AddPort(f, PortTypeN)
+	sw.AddPort(f, PortTypeF)
 
 	// Block forever.
 	select {}
@@ -77,7 +77,7 @@ func (sw *sanSwitch) portRecv(p Port, pt PortType) {
 				return
 			}
 			if fe.Command == els.CmdFLOGI {
-				if err := sw.handleFLOGI(fe.Payload); err != nil {
+				if err := sw.handleFLOGI(p, f, fe.Payload); err != nil {
 					log.Printf("failed to handle FLOGI: %v", err)
 					return
 				}
@@ -90,14 +90,32 @@ func (sw *sanSwitch) portRecv(p Port, pt PortType) {
 	}
 }
 
-func (sw *sanSwitch) handleFLOGI(b []byte) error {
+func (sw *sanSwitch) newReply(f *fc.Frame) *fc.Frame {
+	var fr fc.Frame
+	// TODO(bluecmd): Check that the SOF/EOF
+	fr.SOF = f.SOF
+	fr.EOF = f.EOF
+
+	fr.CSCtl = new(fc.ClassControl)
+	fr.Source = f.Destination
+	fr.Destination = f.Source
+	// TODO more
+	return &fr
+}
+
+func (sw *sanSwitch) handleFLOGI(p Port, f *fc.Frame, b []byte) error {
 	var fr els.FLOGI
 	if err := (&fr).UnmarshalBinary(b); err != nil {
 		return err
 	}
 
-	//f.p.Send(...)
-
 	log.Printf("FLOGI [%s -> %s]: %+v", fr.WWPN.String(), fr.WWNN.String(), fr)
-	return nil
+	//f.p.Send(...)
+	// 1. Assign FCID
+	// 2. Buffer credits?
+	// 3. Send ACC
+
+	r := sw.newReply(f)
+	r.Destination = fc.Address([3]byte{0xef, 0x01, 0x00})
+	return p.Send(r)
 }
