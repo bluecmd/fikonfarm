@@ -6,14 +6,15 @@ import (
 	"log"
 	"net"
 
+	fc "github.com/bluecmd/fibrechannel"
+	"github.com/bluecmd/fibrechannel/fcoe"
 	"github.com/mdlayher/ethernet"
 	"github.com/mdlayher/raw"
 )
 
 const (
-	fcoeEtherType = 0x8906
-	fipEtherType  = 0x8914
-	fcoeMtu       = 9216
+	fipEtherType = 0x8914
+	fcoeMtu      = 9216
 )
 
 var (
@@ -22,26 +23,26 @@ var (
 )
 
 type handler interface {
-	Handle(sof byte, fc []byte, eof byte)
+	Handle(sof fc.SOF, fc []byte, eof fc.EOF)
 }
 
-type fcoe struct {
+type fcoeh struct {
 	ifi *net.Interface
 	h   handler
 }
 
-func New(iface string, h handler) (*fcoe, error) {
+func New(iface string, h handler) (*fcoeh, error) {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return nil, err
 	}
-	return &fcoe{
+	return &fcoeh{
 		ifi: ifi,
 		h:   h,
 	}, nil
 }
 
-func (f *fcoe) Start() error {
+func (f *fcoeh) Start() error {
 	// TODO(bluecmd): Replace promisc with multicast group joins
 	// TODO(bluecmd): Verify MTU is > 2158 or something sane
 	c, err := raw.ListenPacket(f.ifi, fipEtherType, nil)
@@ -51,7 +52,7 @@ func (f *fcoe) Start() error {
 	c.SetPromiscuous(true)
 	go f.handleFip(c)
 
-	c, err = raw.ListenPacket(f.ifi, fcoeEtherType, nil)
+	c, err = raw.ListenPacket(f.ifi, fcoe.EtherType, nil)
 	if err != nil {
 		return err
 	}
@@ -61,7 +62,7 @@ func (f *fcoe) Start() error {
 	return nil
 }
 
-func (f *fcoe) handleFip(c net.PacketConn) {
+func (f *fcoeh) handleFip(c net.PacketConn) {
 	var fr ethernet.Frame
 	b := make([]byte, fcoeMtu)
 
@@ -91,8 +92,9 @@ func (f *fcoe) handleFip(c net.PacketConn) {
 	}
 }
 
-func (f *fcoe) handleFcoe(c net.PacketConn) {
+func (f *fcoeh) handleFcoe(c net.PacketConn) {
 	var fr ethernet.Frame
+	var fe fcoe.Frame
 	b := make([]byte, fcoeMtu)
 
 	for {
@@ -101,17 +103,19 @@ func (f *fcoe) handleFcoe(c net.PacketConn) {
 			log.Fatalf("failed to receive message: %v", err)
 		}
 
-		// Unpack Ethernet II frame into Go representation.
+		// Unpack Ethernet II frame
 		if err := (&fr).UnmarshalBinary(b[:n]); err != nil {
-			log.Fatalf("failed to unmarshal ethernet frame: %v", err)
+			log.Printf("failed to unmarshal Ethernet frame: %v", err)
+			continue
 		}
 
-		// Display source of message and message itself.
+		// Unpack FCoE Frame
+		if err := (&fe).UnmarshalBinary(fr.Payload); err != nil {
+			log.Printf("failed to unmarshal FCoE frame: %v", err)
+			continue
+		}
+
 		log.Printf("FCoE [%s -> %s]", fr.Source.String(), fr.Destination.String())
-		//fcoeHdr := fr.Payload[0:14]
-		sof := fr.Payload[13]
-		fc := fr.Payload[14 : len(fr.Payload)-8]
-		eof := fr.Payload[len(fr.Payload)-7]
-		f.h.Handle(sof, fc, eof)
+		f.h.Handle(fe.SOF, fe.Payload, fe.EOF)
 	}
 }
