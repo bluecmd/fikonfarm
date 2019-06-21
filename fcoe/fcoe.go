@@ -33,24 +33,41 @@ var (
 	fipTypeNames = []string{"Discovery", "Link Services", "Control", "VLAN", "VN2VN"}
 )
 
+type packetSource interface {
+	ReadFrom([]byte) (int, net.Addr, error)
+}
+
+type packetSink interface {
+	WriteTo([]byte, net.Addr) (int, error)
+}
+
 type handler interface {
 	Handle(sof fc.SOF, fc []byte, eof fc.EOF)
 }
 
 type port struct {
 	h    handler
-	ifi  *net.Interface
 	lock *sync.RWMutex
 	recv chan *fc.Frame
 	// These are identical and only needed for write, but
 	// there is no real interface to create a generic send
 	// socket so we have two.
-	fcoe *raw.Conn
-	fip  *raw.Conn
+	fcoe packetSink
+	fip  packetSink
 	peer net.HardwareAddr
+	name string
 }
 
-func NewPort(iface string) (*port, error) {
+type realPort struct {
+	ifi *net.Interface
+	port
+}
+
+type fakePort struct {
+	port
+}
+
+func NewPort(iface string) (*realPort, error) {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return nil, err
@@ -58,39 +75,63 @@ func NewPort(iface string) (*port, error) {
 	if ifi.MTU < fcoeMinimalMTU {
 		return nil, ErrTooLowMTU
 	}
-	return &port{
-		ifi:  ifi,
-		lock: &sync.RWMutex{},
-		recv: make(chan *fc.Frame, 0),
-	}, nil
+	p := &realPort{
+		ifi: ifi,
+		port: port{
+			lock: &sync.RWMutex{},
+			recv: make(chan *fc.Frame, 0),
+			name: fmt.Sprintf("FCoE/%s", ifi.Name),
+		},
+	}
+
+	if err := p.start(); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+func NewFakePort() *fakePort {
+	return &fakePort{
+		port: port{
+			lock: &sync.RWMutex{},
+			recv: make(chan *fc.Frame, 0),
+			name: fmt.Sprintf("FCoE/Fake"),
+		},
+	}
+}
+
+func (p *fakePort) Put([]byte) {
+
 }
 
 func (p *port) String() string {
-	return fmt.Sprintf("FCoE/%s", p.ifi.Name)
+	return p.name
 }
 
-func (p *port) Start() error {
+func (p *realPort) start() error {
 	var err error
 	// TODO(bluecmd): Replace promisc with multicast group joins
 	// TODO(bluecmd): Verify MTU is > 2158 or something sane
-	p.fip, err = raw.ListenPacket(p.ifi, fipEtherType, nil)
+	fip, err := raw.ListenPacket(p.ifi, fipEtherType, nil)
 	if err != nil {
 		return err
 	}
-	p.fip.SetPromiscuous(true)
-	go p.handleFip(p.fip)
+	fip.SetPromiscuous(true)
+	p.fip = fip
+	go p.handleFip(fip)
 
-	p.fcoe, err = raw.ListenPacket(p.ifi, fcoe.EtherType, nil)
+	fcoe, err := raw.ListenPacket(p.ifi, fcoe.EtherType, nil)
 	if err != nil {
 		return err
 	}
-	p.fcoe.SetPromiscuous(true)
-
-	go p.handleFcoe(p.fcoe)
+	fcoe.SetPromiscuous(true)
+	p.fcoe = fcoe
+	go p.handleFcoe(fcoe)
 	return nil
 }
 
-func (p *port) handleFip(c net.PacketConn) {
+func (p *port) handleFip(c packetSource) {
 	var fr ethernet.Frame
 	b := make([]byte, fcoeMtu)
 
@@ -142,7 +183,7 @@ func (p *port) validatePeer(pr *net.HardwareAddr) bool {
 	return true
 }
 
-func (p *port) handleFcoe(c net.PacketConn) {
+func (p *port) handleFcoe(c packetSource) {
 	var fr ethernet.Frame
 	var fe fcoe.Frame
 	var ff fc.Frame

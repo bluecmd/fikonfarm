@@ -36,9 +36,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("FCoE port creation failed: %v", err)
 	}
-	if err := f.Start(); err != nil {
-		log.Fatalf("FCoE port starting failed: %v", err)
-	}
 
 	sw.AddPort(f, PortTypeF)
 
