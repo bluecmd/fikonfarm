@@ -7,7 +7,13 @@ where the mainframe protocol FICON sounds like fig in Swedish. The farm part pla
 
 ## How it works
 
-By using FCIP and FCoE as transport all hardware that is needed is a decently fast Ethernet network card.
+There are three possible integration ways planned, all with pros/cons:
+
+ * FCIP: Fibre Channel over IP is straight forward conceptually, but is implemented in proprietary ways and thus require reverse engineering
+ * FCoE: Fibre Channel over Ethernet might work, but there is little to no precedence of running FICON over it.
+ * FICON: Using an FPGA card like the [DE5-Net](https://www.ebay.com/sch/i.html?_nkw=de5-net) it would be possible to send/receive FICON natively, but costs are higher to get the card
+ 
+Right now the FCIP support for Brocade 7800 is looking promising, and it is planned that the DE5-Net card will be supported. FCoE will be supported as well, but possibly only for FCP - we will see what happens down the line.
 
 An example integration would look something like this:
 
